@@ -39,7 +39,7 @@
 #endif
 #define IS_SYSTEM_MEMORY(mode) (mode & MFX_MEMTYPE_SYSTEM_MEMORY)
 #define MFX_IMPL_VIA_MASK(impl) (0x0f00 & (impl))
-#define QSV_HAVE_AUDIO          !QSV_VERSION_ATLEAST(2, 0)
+#define QSV_HAVE_AUDIO          !QSV_ONEVPL
 
 static const AVRational default_tb = { 1, 90000 };
 
