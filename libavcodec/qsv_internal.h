@@ -79,6 +79,8 @@ typedef struct QSVFrame {
     int queued;
     int used;
 
+    AVBufferRef *ref;
+
     struct QSVFrame *next;
 } QSVFrame;
 
