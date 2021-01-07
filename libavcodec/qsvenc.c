@@ -1146,6 +1146,34 @@ static inline unsigned int qsv_fifo_size(const AVFifoBuffer* fifo)
     return av_fifo_size(fifo)/qsv_fifo_output_size();
 }
 
+static void qsv_frame_free(void *opaque, uint8_t *data)
+{
+    QSVFrame* frame = (QSVFrame*)data;
+    if (frame) {
+        av_frame_free(&frame->frame);
+        av_free(frame);
+    }
+}
+
+static AVBufferRef* qsv_frame_alloc(void *opaque, int size)
+{
+    AVBufferRef *ref;
+    QSVFrame* frame = av_mallocz(sizeof(QSVFrame) + sizeof(mfxPayload*) * QSV_MAX_ENC_PAYLOAD);
+    if (!frame)
+        goto error_out;
+    frame->enc_ctrl.Payload = (void*)(frame + 1);
+    frame->frame = av_frame_alloc();
+    if (!frame->frame)
+         goto error_out;
+    ref = av_buffer_create((uint8_t*)frame, sizeof(QSVFrame), qsv_frame_free, NULL, 0);
+    if (!ref)
+         goto error_out;
+    return ref;
+error_out:
+   qsv_frame_free(NULL, (uint8_t*)frame);
+   return NULL;
+}
+
 int ff_qsv_enc_init(AVCodecContext *avctx, QSVEncContext *q)
 {
     int iopattern = 0;
@@ -1284,6 +1312,9 @@ int ff_qsv_enc_init(AVCodecContext *avctx, QSVEncContext *q)
         return AVERROR(ENOMEM);
     }
 
+    q->input_pool =
+        av_buffer_pool_init2(sizeof(QSVFrame), q, qsv_frame_alloc, NULL);
+
     return 0;
 }
 
@@ -1298,57 +1329,40 @@ static void free_encoder_ctrl_payloads(mfxEncodeCtrl* enc_ctrl)
     }
 }
 
-static void clear_unused_frames(QSVEncContext *q)
+static void clear_unused_frames(QSVEncContext *q, int on_close)
 {
-    QSVFrame *cur = q->work_frames;
-    while (cur) {
-        if (cur->used && !cur->surface.Data.Locked) {
+    QSVFrame **p = &q->work_frames;
+    while (*p) {
+        QSVFrame *cur = *p;
+        if (on_close || !cur->surface.Data.Locked) {
             free_encoder_ctrl_payloads(&cur->enc_ctrl);
             if (cur->frame->format == AV_PIX_FMT_QSV) {
                 av_frame_unref(cur->frame);
             }
-            cur->used = 0;
+            *p = cur->next;
+            av_buffer_unref(&cur->ref);
+        } else {
+            p = &cur->next;
         }
-        cur = cur->next;
     }
 }
 
 static int get_free_frame(QSVEncContext *q, QSVFrame **f)
 {
-    QSVFrame *frame, **last;
+    QSVFrame *frame;
+    AVBufferRef  *ref;
 
-    clear_unused_frames(q);
+    clear_unused_frames(q, 0);
 
-    frame = q->work_frames;
-    last  = &q->work_frames;
-    while (frame) {
-        if (!frame->used) {
-            *f = frame;
-            frame->used = 1;
-            return 0;
-        }
-
-        last  = &frame->next;
-        frame = frame->next;
-    }
-
-    frame = av_mallocz(sizeof(*frame));
-    if (!frame)
-        return AVERROR(ENOMEM);
-    frame->frame = av_frame_alloc();
-    if (!frame->frame) {
-        av_freep(&frame);
+    ref = av_buffer_pool_get(q->input_pool);
+    if (!ref) {
         return AVERROR(ENOMEM);
     }
-    frame->enc_ctrl.Payload = av_mallocz(sizeof(mfxPayload*) * QSV_MAX_ENC_PAYLOAD);
-    if (!frame->enc_ctrl.Payload) {
-        av_freep(&frame);
-        return AVERROR(ENOMEM);
-    }
-    *last = frame;
-
+    frame = (QSVFrame *)ref->data;
+    frame->ref = ref;
+    frame->next = q->work_frames;
+    q->work_frames = frame;
     *f = frame;
-    frame->used = 1;
 
     return 0;
 }
@@ -1602,8 +1616,6 @@ int ff_qsv_encode(AVCodecContext *avctx, QSVEncContext *q,
 
 int ff_qsv_enc_close(AVCodecContext *avctx, QSVEncContext *q)
 {
-    QSVFrame *cur;
-
     if (q->session)
         MFXVideoENCODE_Close(q->session);
 
@@ -1613,14 +1625,7 @@ int ff_qsv_enc_close(AVCodecContext *avctx, QSVEncContext *q)
     av_buffer_unref(&q->frames_ctx.hw_frames_ctx);
     av_buffer_unref(&q->frames_ctx.mids_buf);
 
-    cur = q->work_frames;
-    while (cur) {
-        q->work_frames = cur->next;
-        av_frame_free(&cur->frame);
-        av_free(cur->enc_ctrl.Payload);
-        av_freep(&cur);
-        cur = q->work_frames;
-    }
+    clear_unused_frames(q, 1);
 
     while (q->async_fifo && av_fifo_size(q->async_fifo)) {
         QSVEncOutput *output;
@@ -1635,6 +1640,7 @@ int ff_qsv_enc_close(AVCodecContext *avctx, QSVEncContext *q)
 
     av_freep(&q->extparam);
     av_buffer_pool_uninit(&q->output_pool);
+    av_buffer_pool_uninit(&q->input_pool);
 
     return 0;
 }

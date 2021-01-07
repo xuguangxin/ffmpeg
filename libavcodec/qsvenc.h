@@ -203,6 +203,7 @@ typedef struct QSVEncContext {
     int forced_idr;
 
     AVBufferPool *output_pool;
+    AVBufferPool *input_pool;
 } QSVEncContext;
 
 int ff_qsv_enc_init(AVCodecContext *avctx, QSVEncContext *q);
