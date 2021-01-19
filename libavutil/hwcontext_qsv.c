@@ -807,6 +807,38 @@ static int map_frame_to_surface(const AVFrame *frame, mfxFrameSurface1 *surface)
     return 0;
 }
 
+static int init_internal_session(AVHWFramesContext *ctx, int download)
+{
+    int ret = 0;
+    QSVFramesContext  *s = ctx->internal->priv;
+    int *init = download ? &s->session_download_init : &s->session_upload_init;
+    mfxSession* session = download ? &s->session_download : &s->session_upload;
+
+    while (!*init && !*session && !ret) {
+#if HAVE_PTHREADS
+        if (pthread_mutex_trylock(&s->session_lock) == 0) {
+#endif
+            if (!*init) {
+                ret = qsv_init_internal_session(ctx, session, 0);
+                if (*session)
+                    *init = 1;
+            }
+#if HAVE_PTHREADS
+            pthread_mutex_unlock(&s->session_lock);
+            pthread_cond_signal(&s->session_cond);
+        } else {
+            pthread_mutex_lock(&s->session_lock);
+            while (!*init && !*session) {
+                pthread_cond_wait(&s->session_cond, &s->session_lock);
+            }
+            pthread_mutex_unlock(&s->session_lock);
+        }
+#endif
+    }
+
+    return ret;
+}
+
 static int qsv_transfer_data_from(AVHWFramesContext *ctx, AVFrame *dst,
                                   const AVFrame *src)
 {
@@ -818,29 +850,7 @@ static int qsv_transfer_data_from(AVHWFramesContext *ctx, AVFrame *dst,
     mfxStatus err;
     int ret = 0;
 
-    while (!s->session_download_init && !s->session_download && !ret) {
-#if HAVE_PTHREADS
-        if (pthread_mutex_trylock(&s->session_lock) == 0) {
-#endif
-            if (!s->session_download_init) {
-                ret = qsv_init_internal_session(ctx, &s->session_download, 0);
-                if (s->session_download)
-                    s->session_download_init = 1;
-            }
-#if HAVE_PTHREADS
-            pthread_mutex_unlock(&s->session_lock);
-            pthread_cond_signal(&s->session_cond);
-        } else {
-            pthread_mutex_lock(&s->session_lock);
-            while (!s->session_download_init && !s->session_download) {
-                pthread_cond_wait(&s->session_cond, &s->session_lock);
-            }
-            pthread_mutex_unlock(&s->session_lock);
-        }
-#endif
-    }
-
-    if (ret < 0)
+    if ((ret = init_internal_session(ctx, 1)) < 0)
         return ret;
 
     if (!s->session_download) {
@@ -891,29 +901,7 @@ static int qsv_transfer_data_to(AVHWFramesContext *ctx, AVFrame *dst,
     const AVFrame *src_frame;
     int realigned = 0;
 
-
-    while (!s->session_upload_init && !s->session_upload && !ret) {
-#if HAVE_PTHREADS
-        if (pthread_mutex_trylock(&s->session_lock) == 0) {
-#endif
-            if (!s->session_upload_init) {
-                ret = qsv_init_internal_session(ctx, &s->session_upload, 1);
-                if (s->session_upload)
-                    s->session_upload_init = 1;
-            }
-#if HAVE_PTHREADS
-            pthread_mutex_unlock(&s->session_lock);
-            pthread_cond_signal(&s->session_cond);
-        } else {
-            pthread_mutex_lock(&s->session_lock);
-            while (!s->session_upload_init && !s->session_upload) {
-                pthread_cond_wait(&s->session_cond, &s->session_lock);
-            }
-            pthread_mutex_unlock(&s->session_lock);
-        }
-#endif
-    }
-    if (ret < 0)
+    if ((ret = init_internal_session(ctx, 0)) < 0)
         return ret;
 
     if (src->height & 15 || src->linesize[0] & 15) {
