@@ -839,6 +839,31 @@ static int init_internal_session(AVHWFramesContext *ctx, int download)
     return ret;
 }
 
+static int run_vpp_async(AVHWFramesContext *ctx, mfxSession session, mfxFrameSurface1* in, mfxFrameSurface1* out)
+{
+    mfxSyncPoint sync = NULL;
+    mfxStatus err;
+    do {
+        err = MFXVideoVPP_RunFrameVPPAsync(session, in, out, NULL, &sync);
+        if (err == MFX_WRN_DEVICE_BUSY)
+            av_usleep(1);
+    } while (err == MFX_WRN_DEVICE_BUSY);
+
+    if (err < 0 || !sync) {
+        av_log(ctx, AV_LOG_ERROR, "Error downloading the surface\n");
+        return AVERROR_UNKNOWN;
+    }
+
+    do {
+        err = MFXVideoCORE_SyncOperation(session, sync, 1000);
+    } while (err == MFX_WRN_IN_EXECUTION);
+    if (err < 0) {
+        av_log(ctx, AV_LOG_ERROR, "Error synchronizing the operation: %d\n", err);
+        return AVERROR_UNKNOWN;
+    }
+    return 0;
+}
+
 static int qsv_transfer_data_from(AVHWFramesContext *ctx, AVFrame *dst,
                                   const AVFrame *src)
 {
@@ -846,8 +871,6 @@ static int qsv_transfer_data_from(AVHWFramesContext *ctx, AVFrame *dst,
     mfxFrameSurface1 out = {{ 0 }};
     mfxFrameSurface1 *in = (mfxFrameSurface1*)src->data[3];
 
-    mfxSyncPoint sync = NULL;
-    mfxStatus err;
     int ret = 0;
 
     if ((ret = init_internal_session(ctx, 1)) < 0)
@@ -863,27 +886,7 @@ static int qsv_transfer_data_from(AVHWFramesContext *ctx, AVFrame *dst,
 
     out.Info = in->Info;
     map_frame_to_surface(dst, &out);
-
-    do {
-        err = MFXVideoVPP_RunFrameVPPAsync(s->session_download, in, &out, NULL, &sync);
-        if (err == MFX_WRN_DEVICE_BUSY)
-            av_usleep(1);
-    } while (err == MFX_WRN_DEVICE_BUSY);
-
-    if (err < 0 || !sync) {
-        av_log(ctx, AV_LOG_ERROR, "Error downloading the surface\n");
-        return AVERROR_UNKNOWN;
-    }
-
-    do {
-        err = MFXVideoCORE_SyncOperation(s->session_download, sync, 1000);
-    } while (err == MFX_WRN_IN_EXECUTION);
-    if (err < 0) {
-        av_log(ctx, AV_LOG_ERROR, "Error synchronizing the operation: %d\n", err);
-        return AVERROR_UNKNOWN;
-    }
-
-    return 0;
+    return run_vpp_async(ctx, s->session_download, in, &out);
 }
 
 static int qsv_transfer_data_to(AVHWFramesContext *ctx, AVFrame *dst,
@@ -893,8 +896,6 @@ static int qsv_transfer_data_to(AVHWFramesContext *ctx, AVFrame *dst,
     mfxFrameSurface1   in = {{ 0 }};
     mfxFrameSurface1 *out = (mfxFrameSurface1*)dst->data[3];
 
-    mfxSyncPoint sync = NULL;
-    mfxStatus err;
     int ret = 0;
     /* make a copy if the input is not padded as libmfx requires */
     AVFrame tmp_frame;
@@ -934,29 +935,12 @@ static int qsv_transfer_data_to(AVHWFramesContext *ctx, AVFrame *dst,
     in.Info = out->Info;
     map_frame_to_surface(src_frame, &in);
 
-    do {
-        err = MFXVideoVPP_RunFrameVPPAsync(s->session_upload, &in, out, NULL, &sync);
-        if (err == MFX_WRN_DEVICE_BUSY)
-            av_usleep(1);
-    } while (err == MFX_WRN_DEVICE_BUSY);
-
-    if (err < 0 || !sync) {
-        av_log(ctx, AV_LOG_ERROR, "Error uploading the surface\n");
-        return AVERROR_UNKNOWN;
-    }
-
-    do {
-        err = MFXVideoCORE_SyncOperation(s->session_upload, sync, 1000);
-    } while (err == MFX_WRN_IN_EXECUTION);
-    if (err < 0) {
-        av_log(ctx, AV_LOG_ERROR, "Error synchronizing the operation\n");
-        return AVERROR_UNKNOWN;
-    }
+    ret = run_vpp_async(ctx, s->session_upload, &in, out);
 
     if (realigned)
         av_frame_unref(&tmp_frame);
 
-    return 0;
+    return ret;
 }
 
 static int qsv_frames_derive_to(AVHWFramesContext *dst_ctx,
