@@ -505,8 +505,12 @@ int av_frame_make_writable(AVFrame *frame)
     tmp.channel_layout = frame->channel_layout;
     tmp.nb_samples     = frame->nb_samples;
 
-    if (frame->hw_frames_ctx)
+    if (frame->hw_frames_ctx) {
         ret = av_hwframe_get_buffer(frame->hw_frames_ctx, &tmp, 0);
+        //hwframe will rewrite the width and height
+        tmp.width = frame->width;
+        tmp.height = frame->height;
+    }
     else
         ret = av_frame_get_buffer(&tmp, 0);
     if (ret < 0)
