@@ -904,6 +904,32 @@ fail:
     return err;
 }
 
+static int vaapi_transfer_data(AVHWFramesContext *hwfc,
+                               AVFrame *dst, const AVFrame *src)
+{
+    AVVAAPIDeviceContext *hwctx = hwfc->device_ctx->hwctx;
+    VAStatus vas;
+    VACopyObject d, s;
+    VACopyOption o = {.bits.va_copy_sync = VA_EXEC_ASYNC};
+    memset(&d, 0, sizeof(d));
+    d.obj_type = VACopyObjectSurface;
+    d.object.surface_id = (VASurfaceID)dst->data[3];
+
+    memset(&s, 0, sizeof(s));
+    s.object.surface_id = (VASurfaceID)src->data[3];
+    s.obj_type = VACopyObjectSurface;
+
+
+    vas = vaCopy(hwctx->display, &d, &s, o);
+    if (vas != VA_STATUS_SUCCESS) {
+        av_log(hwfc, AV_LOG_ERROR, "Failed to derive image from "
+               "surface from %#x to %#x: %d (%s).\n",
+               s.object.surface_id, d.object.surface_id, vas, vaErrorStr(vas));
+        return AVERROR(EIO);
+    }
+    return 0;
+}
+
 static int vaapi_transfer_data_from(AVHWFramesContext *hwfc,
                                     AVFrame *dst, const AVFrame *src)
 {
@@ -912,6 +938,8 @@ static int vaapi_transfer_data_from(AVHWFramesContext *hwfc,
 
     if (dst->width > hwfc->width || dst->height > hwfc->height)
         return AVERROR(EINVAL);
+    if (src->format == AV_PIX_FMT_VAAPI && dst->format == AV_PIX_FMT_VAAPI)
+        return vaapi_transfer_data(hwfc, dst, src);
 
     map = av_frame_alloc();
     if (!map)
