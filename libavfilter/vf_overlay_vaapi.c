@@ -41,29 +41,14 @@ typedef struct OverlayVAAPIContext {
 static int overlay_vaapi_query_formats(AVFilterContext *ctx)
 {
     int ret;
-    enum {
-        MAIN    = 0,
-        OVERLAY = 1,
-    };
-
-    static const enum AVPixelFormat pix_fmts[] = {
+    static const enum AVPixelFormat fmts[] = {
         AV_PIX_FMT_VAAPI,
         AV_PIX_FMT_NONE
     };
 
-    ret = ff_formats_ref(ff_make_format_list(pix_fmts), &ctx->inputs[MAIN]->outcfg.formats);
-    if (ret < 0)
-        return ret;
+    AVFilterFormats *pix_fmts = ff_make_format_list(fmts);
 
-    ret = ff_formats_ref(ff_make_format_list(pix_fmts), &ctx->inputs[OVERLAY]->outcfg.formats);
-    if (ret < 0)
-        return ret;
-
-    ret = ff_formats_ref(ff_make_format_list(pix_fmts), &ctx->outputs[0]->incfg.formats);
-    if (ret < 0)
-        return ret;
-
-    return 0;
+    return ff_set_common_formats(ctx, pix_fmts);
 }
 
 static int overlay_vaapi_build_filter_params(AVFilterContext *avctx)
@@ -98,105 +83,6 @@ static int overlay_vaapi_build_filter_params(AVFilterContext *avctx)
     return 0;
 }
 
-
-static int overlay_vaapi_render_picture(AVFilterContext *avctx,
-                                        VAProcPipelineParameterBuffer *params,
-                                        VAProcPipelineParameterBuffer *subpic_params,
-                                        AVFrame *output_frame)
-{
-    VAAPIVPPContext *ctx   = avctx->priv;
-    VASurfaceID output_surface;
-    VABufferID params_id;
-    VABufferID subpic_params_id;
-    VAStatus vas;
-    int err = 0;
-
-    output_surface = (VASurfaceID)(uintptr_t)output_frame->data[3];
-
-    vas = vaBeginPicture(ctx->hwctx->display,
-                         ctx->va_context, output_surface);
-    if (vas != VA_STATUS_SUCCESS) {
-        av_log(avctx, AV_LOG_ERROR, "Failed to attach new picture: "
-               "%d (%s).\n", vas, vaErrorStr(vas));
-        err = AVERROR(EIO);
-        goto fail;
-    }
-
-    vas = vaCreateBuffer(ctx->hwctx->display, ctx->va_context,
-                         VAProcPipelineParameterBufferType,
-                         sizeof(*params), 1, params, &params_id);
-    if (vas != VA_STATUS_SUCCESS) {
-        av_log(avctx, AV_LOG_ERROR, "Failed to create parameter buffer: "
-               "%d (%s).\n", vas, vaErrorStr(vas));
-        err = AVERROR(EIO);
-        goto fail_after_begin;
-    }
-    av_log(avctx, AV_LOG_DEBUG, "Pipeline parameter buffer is %#x.\n",
-           params_id);
-
-
-    vas = vaCreateBuffer(ctx->hwctx->display, ctx->va_context,
-                         VAProcPipelineParameterBufferType,
-                         sizeof(*subpic_params), 1, subpic_params, &subpic_params_id);
-    if (vas != VA_STATUS_SUCCESS) {
-        av_log(avctx, AV_LOG_ERROR, "Failed to create parameter buffer: "
-               "%d (%s).\n", vas, vaErrorStr(vas));
-        err = AVERROR(EIO);
-        goto fail_after_begin;
-    }
-    av_log(avctx, AV_LOG_DEBUG, "Pipeline subpic parameter buffer is %#x.\n",
-           subpic_params_id);
-
-    vas = vaRenderPicture(ctx->hwctx->display, ctx->va_context,
-                          &params_id, 1);
-    if (vas != VA_STATUS_SUCCESS) {
-        av_log(avctx, AV_LOG_ERROR, "Failed to render parameter buffer: "
-               "%d (%s).\n", vas, vaErrorStr(vas));
-        err = AVERROR(EIO);
-        goto fail_after_begin;
-    }
-
-    vas = vaRenderPicture(ctx->hwctx->display, ctx->va_context,
-                          &subpic_params_id, 1);
-    if (vas != VA_STATUS_SUCCESS) {
-        av_log(avctx, AV_LOG_ERROR, "Failed to render subpic parameter buffer: "
-               "%d (%s).\n", vas, vaErrorStr(vas));
-        err = AVERROR(EIO);
-        goto fail_after_begin;
-    }
-
-    vas = vaEndPicture(ctx->hwctx->display, ctx->va_context);
-    if (vas != VA_STATUS_SUCCESS) {
-        av_log(avctx, AV_LOG_ERROR, "Failed to start picture processing: "
-               "%d (%s).\n", vas, vaErrorStr(vas));
-        err = AVERROR(EIO);
-        goto fail_after_render;
-    }
-
-    if (CONFIG_VAAPI_1 || ctx->hwctx->driver_quirks &
-        AV_VAAPI_DRIVER_QUIRK_RENDER_PARAM_BUFFERS) {
-        vas = vaDestroyBuffer(ctx->hwctx->display, params_id);
-        if (vas != VA_STATUS_SUCCESS) {
-            av_log(avctx, AV_LOG_ERROR, "Failed to free parameter buffer: "
-                   "%d (%s).\n", vas, vaErrorStr(vas));
-            // And ignore.
-        }
-    }
-
-    return 0;
-
-    // We want to make sure that if vaBeginPicture has been called, we also
-    // call vaRenderPicture and vaEndPicture.  These calls may well fail or
-    // do something else nasty, but once we're in this failure case there
-    // isn't much else we can do.
-fail_after_begin:
-    vaRenderPicture(ctx->hwctx->display, ctx->va_context, &params_id, 1);
-fail_after_render:
-    vaEndPicture(ctx->hwctx->display, ctx->va_context);
-fail:
-    return err;
-}
-
 static int overlay_vaapi_blend(FFFrameSync *fs)
 {
     AVFilterContext    *avctx = fs->parent;
@@ -205,7 +91,7 @@ static int overlay_vaapi_blend(FFFrameSync *fs)
     VAAPIVPPContext *vpp_ctx  = avctx->priv;
     AVFrame *input_main, *input_overlay;
     AVFrame *output;
-    VAProcPipelineParameterBuffer params, subpic_params;
+    VAProcPipelineParameterBuffer params;
     VABlendState blend_state; // Blend State
     VARectangle overlay_region, output_region;
     int err;
@@ -214,13 +100,9 @@ static int overlay_vaapi_blend(FFFrameSync *fs)
     if (err < 0)
         return err;
 
-    err = ff_framesync_get_frame(fs, 0, &input_main, 0);
+    err = ff_framesync_dualinput_get(fs, &input_main, &input_overlay);
     if (err < 0)
         return err;
-    err = ff_framesync_get_frame(fs, 1, &input_overlay, 0);
-    if (err < 0)
-        return err;
-
     av_log(avctx, AV_LOG_DEBUG, "Filter main: %s, %ux%u (%"PRId64").\n",
            av_get_pix_fmt_name(input_main->format),
            input_main->width, input_main->height, input_main->pts);
@@ -229,21 +111,17 @@ static int overlay_vaapi_blend(FFFrameSync *fs)
            av_get_pix_fmt_name(input_overlay->format),
            input_overlay->width, input_overlay->height, input_overlay->pts);
 
-    if (vpp_ctx->va_context == VA_INVALID_ID)
-        return AVERROR(EINVAL);
-
-    output = ff_get_video_buffer(outlink, outlink->w, outlink->h);
-    if (!output) {
-        err = AVERROR(ENOMEM);
+    if (vpp_ctx->va_context == VA_INVALID_ID) {
+        err = AVERROR(EINVAL);
         goto fail;
     }
 
-    err = av_frame_copy_props(output, input_main);
+    err = av_frame_make_writable(input_main);
     if (err < 0)
         goto fail;
-
+    output = input_main;
     err = ff_vaapi_vpp_init_params(avctx, &params,
-                                   input_main, output);
+                                   input_overlay, output);
     if (err < 0)
         goto fail;
 
@@ -252,13 +130,6 @@ static int overlay_vaapi_blend(FFFrameSync *fs)
         .y      = ctx->overlay_oy,
         .width  = ctx->overlay_ow ? ctx->overlay_ow : input_overlay->width,
         .height = ctx->overlay_oh ? ctx->overlay_oh : input_overlay->height,
-    };
-
-    output_region = (VARectangle) {
-        .x      = 0,
-        .y      = 0,
-        .width  = output->width,
-        .height = output->height,
     };
 
     if (overlay_region.x + overlay_region.width > input_main->width ||
@@ -271,30 +142,29 @@ static int overlay_vaapi_blend(FFFrameSync *fs)
     params.filters     = &vpp_ctx->filter_buffers[0];
     params.num_filters = vpp_ctx->nb_filter_buffers;
 
-    params.output_region = &output_region;
-    params.output_background_color = VAAPI_VPP_BACKGROUND_BLACK;
+    params.output_region = &overlay_region;
+    //params.output_background_color = VAAPI_VPP_BACKGROUND_BLACK;
 
-    memcpy(&subpic_params, &params, sizeof(subpic_params));
+    //blend_state.flags = VA_BLEND_GLOBAL_ALPHA;
+    //blend_state.global_alpha = ctx->alpha;
+{
+    static int flag = 1;
+    flag = !flag;
+    params.output_background_color = flag == 0 ? 0x0 : 0xffff0000;
+    params.filter_flags = VA_FILTER_SCALING_HQ;
 
-    blend_state.flags = VA_BLEND_GLOBAL_ALPHA;
-    blend_state.global_alpha = ctx->alpha;
-    subpic_params.blend_state = &blend_state;
-
-    subpic_params.surface = (VASurfaceID)(uintptr_t)input_overlay->data[3];
-    subpic_params.output_region = &overlay_region;
-
-    err = overlay_vaapi_render_picture(avctx, &params, &subpic_params, output);
+    err = ff_vaapi_vpp_render_picture(avctx, &params, output);
     if (err < 0)
         goto fail;
 
+}
     av_log(avctx, AV_LOG_DEBUG, "Filter output: %s, %ux%u (%"PRId64").\n",
            av_get_pix_fmt_name(output->format),
            output->width, output->height, output->pts);
-
     return ff_filter_frame(outlink, output);
 
 fail:
-    av_frame_free(&output);
+    av_frame_free(&input_main);
     return err;
 }
 
@@ -322,17 +192,38 @@ static int overlay_vaapi_init_framesync(AVFilterContext *avctx)
 
 static int overlay_vaapi_config_output(AVFilterLink *outlink)
 {
+    int err;
     AVFilterContext  *avctx  = outlink->src;
     OverlayVAAPIContext *ctx = avctx->priv;
     VAAPIVPPContext *vpp_ctx = avctx->priv;
-    int err;
+    AVFilterLink *inlink = avctx->inputs[0];
+    AVHWFramesContext  *frames_ctx = (AVHWFramesContext*)inlink->hw_frames_ctx->data;
+
+    AVFilterLink *inlink_overlay = avctx->inputs[1];
+    AVHWFramesContext  *frames_ctx_overlay = (AVHWFramesContext*)inlink_overlay->hw_frames_ctx->data;
+
+    if (!frames_ctx) {
+        av_log(ctx, AV_LOG_ERROR, "No hw context provided on main input\n");
+        return AVERROR(EINVAL);
+    }
+
+    if (!frames_ctx_overlay) {
+        av_log(ctx, AV_LOG_ERROR, "No hw context provided on overlay input\n");
+        return AVERROR(EINVAL);
+    }
 
     err = overlay_vaapi_init_framesync(avctx);
     if (err < 0)
         return err;
 
-    vpp_ctx->output_width  = avctx->inputs[0]->w;
-    vpp_ctx->output_height = avctx->inputs[0]->h;
+    vpp_ctx->input_frames_ref = av_buffer_ref(inlink->hw_frames_ctx);
+    if (!vpp_ctx->input_frames_ref) {
+        av_log(avctx, AV_LOG_ERROR, "A input frames reference create "
+            "failed.\n");
+        return AVERROR(ENOMEM);
+    }
+    vpp_ctx->input_frames = (AVHWFramesContext*)vpp_ctx->input_frames_ref->data;
+    vpp_ctx->reuse_input_frames = 1;
 
     err = ff_vaapi_vpp_config_output(outlink);
     if (err < 0)
@@ -382,6 +273,14 @@ static const AVOption overlay_vaapi_options[] = {
       OFFSET(overlay_oh), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, INT_MAX, .flags = FLAGS },
     { "alpha", "Overlay global alpha",
       OFFSET(alpha), AV_OPT_TYPE_FLOAT, { .dbl = 1.0}, 0.0, 1.0, .flags = FLAGS},
+    { "eof_action", "Action to take when encountering EOF from secondary input ",
+        OFFSET(fs.opt_eof_action), AV_OPT_TYPE_INT, { .i64 = EOF_ACTION_REPEAT },
+        EOF_ACTION_REPEAT, EOF_ACTION_PASS, .flags = FLAGS, "eof_action" },
+        { "repeat", "Repeat the previous frame.",   0, AV_OPT_TYPE_CONST, { .i64 = EOF_ACTION_REPEAT }, .flags = FLAGS, "eof_action" },
+        { "endall", "End both streams.",            0, AV_OPT_TYPE_CONST, { .i64 = EOF_ACTION_ENDALL }, .flags = FLAGS, "eof_action" },
+        { "pass",   "Pass through the main input.", 0, AV_OPT_TYPE_CONST, { .i64 = EOF_ACTION_PASS },   .flags = FLAGS, "eof_action" },
+    { "shortest", "force termination when the shortest input terminates", OFFSET(fs.opt_shortest), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, FLAGS },
+    { "repeatlast", "repeat overlay of the last overlay frame", OFFSET(fs.opt_repeatlast), AV_OPT_TYPE_BOOL, {.i64=1}, 0, 1, FLAGS },
     { NULL },
 };
 
@@ -391,13 +290,10 @@ static const AVFilterPad overlay_vaapi_inputs[] = {
     {
         .name             = "main",
         .type             = AVMEDIA_TYPE_VIDEO,
-        .get_video_buffer = ff_default_get_video_buffer,
-        .config_props     = &ff_vaapi_vpp_config_input,
     },
     {
         .name             = "overlay",
         .type             = AVMEDIA_TYPE_VIDEO,
-        .get_video_buffer = ff_default_get_video_buffer,
     },
     { NULL }
 };

@@ -43,6 +43,7 @@ typedef struct VAAPIVPPContext {
     AVBufferRef       *input_frames_ref;
     AVHWFramesContext *input_frames;
     VARectangle        input_region;
+    int                reuse_input_frames;
 
     enum AVPixelFormat output_format;
     int output_width;   // computed width

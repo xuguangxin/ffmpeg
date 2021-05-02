@@ -172,32 +172,41 @@ int ff_vaapi_vpp_config_output(AVFilterLink *outlink)
         goto fail;
     }
 
-    outlink->hw_frames_ctx = av_hwframe_ctx_alloc(ctx->device_ref);
-    if (!outlink->hw_frames_ctx) {
-        av_log(avctx, AV_LOG_ERROR, "Failed to create HW frame context "
-               "for output.\n");
-        err = AVERROR(ENOMEM);
-        goto fail;
-    }
+    if (!ctx->reuse_input_frames) {
+        outlink->hw_frames_ctx = av_hwframe_ctx_alloc(ctx->device_ref);
+        if (!outlink->hw_frames_ctx) {
+            av_log(avctx, AV_LOG_ERROR, "Failed to create HW frame context "
+                "for output.\n");
+            err = AVERROR(ENOMEM);
+            goto fail;
+        }
 
-    output_frames = (AVHWFramesContext*)outlink->hw_frames_ctx->data;
+        output_frames = (AVHWFramesContext*)outlink->hw_frames_ctx->data;
 
-    output_frames->format    = AV_PIX_FMT_VAAPI;
-    output_frames->sw_format = ctx->output_format;
-    output_frames->width     = ctx->output_width;
-    output_frames->height    = ctx->output_height;
+        output_frames->format    = AV_PIX_FMT_VAAPI;
+        output_frames->sw_format = ctx->output_format;
+        output_frames->width     = ctx->output_width;
+        output_frames->height    = ctx->output_height;
 
-    output_frames->initial_pool_size = 4;
+        output_frames->initial_pool_size = 4;
 
-    err = ff_filter_init_hw_frames(avctx, outlink, 10);
-    if (err < 0)
-        goto fail;
+        err = ff_filter_init_hw_frames(avctx, outlink, 10);
+        if (err < 0)
+            goto fail;
 
-    err = av_hwframe_ctx_init(outlink->hw_frames_ctx);
-    if (err < 0) {
-        av_log(avctx, AV_LOG_ERROR, "Failed to initialise VAAPI frame "
-               "context for output: %d\n", err);
-        goto fail;
+        err = av_hwframe_ctx_init(outlink->hw_frames_ctx);
+        if (err < 0) {
+            av_log(avctx, AV_LOG_ERROR, "Failed to initialise VAAPI frame "
+                "context for output: %d\n", err);
+            goto fail;
+        }
+    } else {
+        outlink->hw_frames_ctx = av_buffer_ref(avctx->inputs[0]->hw_frames_ctx);
+        if (!outlink->hw_frames_ctx) {
+            err = AVERROR(ENOMEM);
+            goto fail;
+        }
+        output_frames = (AVHWFramesContext*)outlink->hw_frames_ctx->data;
     }
 
     va_frames = output_frames->hwctx;
